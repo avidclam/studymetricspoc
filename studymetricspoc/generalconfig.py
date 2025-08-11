@@ -13,13 +13,10 @@ def extract_json_path(doc, json_path):
 class GeneralConfig:
     def __init__(self, data, default=None, alias_section='alias'):
         self.data = data
+        self.alias = {}
         self.default = default if isinstance(default, dict) else {}
         self.alias_section = alias_section
-        self.alias = {}
-        if self.alias_section in self.default and isinstance(self.default[self.alias_section], dict):
-            self.alias.update(self.default[self.alias_section])
-        if self.alias_section in self.data and isinstance(self.data[self.alias_section], dict):
-            self.alias.update(self.data[self.alias_section])
+        self._rebuild_alias()
 
     def get(self, alias_or_path=None, other=None):
         json_path = self.alias.get(alias_or_path, alias_or_path)
@@ -37,3 +34,16 @@ class GeneralConfig:
             for key, value in dictionary.items():
                 result[key] = value
         return result
+
+    def _rebuild_alias(self):
+        self.alias = {}
+        if self.alias_section in self.default and isinstance(
+                self.default[self.alias_section], dict):
+            self.alias.update(self.default[self.alias_section])
+        if self.alias_section in self.data and isinstance(
+                self.data[self.alias_section], dict):
+            self.alias.update(self.data[self.alias_section])
+
+    def replace_data(self, data):
+        self.data = data
+        self._rebuild_alias()

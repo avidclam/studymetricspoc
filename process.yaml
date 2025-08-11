@@ -1,0 +1,455 @@
+alias:
+    RESULT_PATH: $.config.result.path
+    SOURCE2STAGE: $.config.step.source_to_stage
+    STAGE2GRAPH: $.config.step.stage_to_graph
+    GRAPH_PATH: $.config.connection.graph.path
+    STAGE_PATH: $.config.connection.stage.path
+    BUILDER_DDL: $.builder.ddl
+    BUILDER_SQL: $.builder.sql
+    BUILDER_POSTINGEST: $.builder.postingest
+    CACHE_YAML: $.config.cache.yaml
+    CACHE_ALIAS: $.config.cache.alias
+    CACHE_QUERY: $.config.cache.query
+    CACHE_METRIC: $.config.cache.metric
+config:
+    result:
+        path: result
+    step:
+        source_to_stage: 'process/pharmaversesdtm/source_to_stage.ipynb'
+        stage_to_graph: 'process/database/stage_to_graph.ipynb'
+    connection:
+        sdtm:
+            path: source/pharmaversesdtm/main/data
+        stage:
+            path: database/stage/sdtm.ddb
+            meta_path: database/stage/sdtm_meta.txt
+        graph:
+            path: database/graph/database.kuzu
+            option:
+                max_concurrent_queries: 6
+    cache:
+        yaml: false
+        alias: false
+        query: false
+        metric: false
+builder:  # Contains graph and SQL statements to create graph database and populate it from relational database
+    ddl: |
+        CREATE NODE TABLE Study (
+            id STRING,
+            plansub INT64,
+            trt STRING,
+            title STRING,
+            PRIMARY KEY (id));
+        CREATE NODE TABLE Site (
+            id STRING,
+            PRIMARY KEY (id));
+        CREATE REL TABLE SelectedFor(FROM Site TO Study);
+        CREATE NODE TABLE Subject (
+            id STRING,
+            age INT64,
+            ageu STRING,
+            sex STRING,
+            PRIMARY KEY (id));
+        CREATE REL TABLE RecruitedBy(FROM Subject TO Site);
+        CREATE NODE TABLE SubjectVisit (
+            id STRING,
+            seq INT64,
+            visitnum STRING,
+            visit STRING,
+            visitdy INT64,
+            svstdtc DATE,
+            svendtc DATE,
+            PRIMARY KEY (id));
+        CREATE REL TABLE Attends(FROM Subject TO SubjectVisit);
+        CREATE REL TABLE AttendsNext(FROM SubjectVisit TO SubjectVisit);
+        CREATE NODE TABLE Disposition (
+            id STRING,
+            dsterm STRING,
+            dsdecod STRING,
+            dscat STRING,
+            dsstdtc DATE,
+            PRIMARY KEY (id));
+        CREATE REL TABLE Reveals(FROM SubjectVisit TO Disposition);
+        CREATE NODE TABLE SubjectStatus (
+            id STRING,
+            name STRING,
+            assigned DATE,
+            reason STRING,
+            PRIMARY KEY (id));
+        CREATE REL TABLE LinksTo(FROM SubjectVisit TO SubjectStatus);
+        CREATE REL TABLE Assigns(FROM Disposition TO SubjectStatus);
+        CREATE REL TABLE Achieves(FROM Subject TO SubjectStatus);
+        CREATE REL TABLE AchievesNext(FROM SubjectStatus TO SubjectStatus);
+        CREATE NODE TABLE AE (
+            id STRING,
+            aesoc STRING,
+            aeser BOOLEAN,
+            aestdtc DATE,
+            PRIMARY KEY (id));
+        CREATE REL TABLE Suffers(FROM Subject TO AE);
+    sql:
+        Study: |
+            WITH study AS (SELECT DISTINCT studyid from ts),
+            planned_subjects AS 
+                (SELECT studyid, CAST(FIRST(tsval ORDER BY tsseq) AS INT) AS plansub 
+                 FROM ts WHERE tsparmcd = 'PLANSUB' GROUP BY studyid),
+            trt AS 
+                (SELECT studyid, FIRST(tsval ORDER BY tsseq) AS trt
+                 FROM ts WHERE tsparmcd = 'TRT' GROUP BY studyid),
+            title AS 
+                (SELECT studyid, FIRST(tsval ORDER BY tsseq) AS title
+                 FROM ts WHERE tsparmcd = 'TITLE' GROUP BY studyid)
+            SELECT
+                s.studyid AS id,
+                ps.plansub,
+                t.trt,
+                ti.title
+            FROM study s
+            JOIN planned_subjects ps ON s.studyid = ps.studyid
+            JOIN trt t ON s.studyid = t.studyid
+            JOIN title ti ON s.studyid = ti.studyid
+            ORDER by s.studyid
+        Site: SELECT DISTINCT siteid AS id FROM dm
+        SelectedFor: SELECT DISTINCT siteid AS Site, studyid AS Study FROM dm
+        Subject: |
+            SELECT
+                usubjid AS id,
+                CAST(age AS INT) AS age,
+                ageu AS ageu,
+                sex AS sex
+            FROM dm
+        RecruitedBy: SELECT DISTINCT usubjid AS Subject, siteid AS Site FROM dm
+        SubjectVisit: |
+            SELECT
+                CONCAT(usubjid, ' ', CAST(visitnum AS VARCHAR)) AS id,
+                ROW_NUMBER() OVER (PARTITION BY usubjid ORDER BY CAST(svstdtc AS DATE), CAST(visitnum AS FLOAT)) AS seq,
+                CAST(visitnum AS VARCHAR) AS visitnum,
+                visit AS visit,
+                CAST(visitdy AS INT) AS visitdy,
+                CAST(svstdtc AS DATE) AS svstdtc,
+                CAST(svendtc AS DATE) AS svendtc
+            FROM sv
+        Attends: |
+            SELECT
+                usubjid AS Subject,
+                CONCAT(usubjid, ' ', CAST(visitnum AS VARCHAR)) AS SubjectVisit
+            FROM sv
+        AttendsNext: |
+            WITH subject_visit_chain AS
+            (SELECT
+                ROW_NUMBER() OVER (PARTITION BY usubjid ORDER BY CAST(svstdtc AS DATE), CAST(visitnum AS FLOAT)) AS seq,
+                usubjid AS usubjid,
+                CONCAT(usubjid, ' ', CAST(visitnum AS VARCHAR)) AS id
+            FROM sv),
+            subject_visit_chain_with_next AS
+            (SELECT id, LEAD(id) OVER (PARTITION BY usubjid ORDER BY seq) AS next_id FROM subject_visit_chain)
+            SELECT id, next_id FROM subject_visit_chain_with_next WHERE next_id IS NOT NULL
+        Disposition: |
+            SELECT
+                CONCAT(usubjid, '-', dsseq) AS id,
+                dsterm AS dsterm,
+                dsdecod AS dsdecod,
+                dscat AS dscat,
+                CAST(dsstdtc AS DATE) AS dsstdtc
+            FROM ds
+        Reveals: |
+            SELECT
+                CONCAT(usubjid, ' ', CAST(visitnum AS VARCHAR)) AS SubjectVisit,
+                CONCAT(usubjid, '-', dsseq) AS  Disposition
+            FROM ds
+        AE : |
+            WITH ae_cast AS
+            (SELECT
+                usubjid AS usubjid,
+                aespid AS aespid,
+                aesoc AS aesoc,
+                CASE WHEN aeser = 'N' THEN FALSE WHEN aeser = 'Y' THEN TRUE ELSE NULL END AS aeser,
+                TRY_CAST(aestdtc AS DATE) AS aestdtc
+            FROM ae
+            )
+            SELECT DISTINCT
+                CONCAT(usubjid, ' ', aestdtc, ' ', aespid) AS id,
+                aesoc,
+                aeser,
+                aestdtc
+            FROM ae_cast
+            WHERE aestdtc IS NOT NULL
+        Suffers : |
+            WITH ae_cast AS
+            (SELECT
+                usubjid AS usubjid,
+                aespid AS aespid,
+                TRY_CAST(aestdtc AS DATE) AS aestdtc
+            FROM ae
+            )
+            SELECT DISTINCT
+                usubjid AS Subject,
+                CONCAT(usubjid, ' ', aestdtc, ' ', aespid) AS AE
+            FROM ae_cast
+            WHERE aestdtc IS NOT NULL
+    postingest:  # this section goes after all data were ingested into the graph database
+        subject_status:  # business logic for creation of Subject statuses
+            screened: |  # Visit "SCREENING 1" leads to "Screened" status, which is always the first (even when Screen Failed on this visit)
+                MATCH (s:Subject)-[:Attends]->(screening:SubjectVisit) WHERE screening.visit = 'SCREENING 1'
+                WITH s, screening, concat(s.id, ': Screened') AS ss_id, screening.svstdtc AS ss_assigned
+                MERGE (ss:SubjectStatus {id: ss_id, name: 'Screened', assigned: ss_assigned, reason: 'Visit SCREENING 1'})
+                MERGE (s)-[:Achieves]->(ss)
+                MERGE (screening)-[:LinksTo]->(ss)
+            screen_failure: |  # Disposition "SCREEN FAILURE" assigns corresponding status; status chain from Screened to Screen Failed
+                MATCH (s:Subject)-[:Achieves]->(prestatus:SubjectStatus) WHERE prestatus.name = 'Screened'
+                MATCH (s:Subject)-[:Attends]->(:SubjectVisit)-[:Reveals]->(failure:Disposition) WHERE failure.dsdecod = 'SCREEN FAILURE'
+                WITH s, prestatus, failure, concat(s.id, ': Screen Failure') AS ss_id, failure.dsstdtc AS ss_assigned, failure.dsterm as ss_reason
+                MERGE (ss:SubjectStatus {id: ss_id, name: 'Screen Failure', assigned: ss_assigned, reason:ss_reason})
+                MERGE (s)-[:Achieves]->(ss)
+                MERGE (failure)-[:Assigns]->(ss)
+                MERGE (prestatus)-[:AchievesNext]->(ss)
+            randomized: |  # Disposition "RANDOMIZED" assigns corresponding status; status chain from Screened to Randomized
+                MATCH (s:Subject)-[:Achieves]->(prestatus:SubjectStatus) WHERE prestatus.name = 'Screened'
+                MATCH (s:Subject)-[:Attends]->(:SubjectVisit)-[:Reveals]->(randomized:Disposition) WHERE randomized.dsdecod = 'RANDOMIZED'
+                WITH s, prestatus, randomized, concat(s.id, ': Randomized') AS ss_id, randomized.dsstdtc AS ss_assigned, randomized.dsterm as ss_reason
+                MERGE (ss:SubjectStatus {id: ss_id, name: 'Randomized', assigned: ss_assigned, reason:ss_reason})
+                MERGE (s)-[:Achieves]->(ss)
+                MERGE (randomized)-[:Assigns]->(ss)
+                MERGE (prestatus)-[:AchievesNext]->(ss)
+            completed: |  # Disposition "COMPLETED" assigns corresponding status; status chain from the last chain node to Completed
+                MATCH (s:Subject)-[:Achieves]->(prestatus:SubjectStatus) WHERE NOT (prestatus)-[:AchievesNext]->(:SubjectStatus)
+                MATCH (s:Subject)-[:Attends]->(:SubjectVisit)-[:Reveals]->(completed:Disposition) WHERE completed.dsdecod = 'COMPLETED'
+                WITH s, prestatus, completed, concat(s.id, ': Completed') AS ss_id, completed.dsstdtc AS ss_assigned, completed.dsterm as ss_reason
+                MERGE (ss:SubjectStatus {id: ss_id, name: 'Completed', assigned: ss_assigned, reason:ss_reason})
+                MERGE (s)-[:Achieves]->(ss)
+                MERGE (completed)-[:Assigns]->(ss)
+                MERGE (prestatus)-[:AchievesNext]->(ss)
+            withdrawn: |  # Some dispositions assign "Withdrawn from Study" status; status chain from the last chain node to Completed
+                MATCH (s:Subject)-[:Achieves]->(prestatus:SubjectStatus) WHERE NOT (prestatus)-[:AchievesNext]->(:SubjectStatus)
+                MATCH (s:Subject)-[:Attends]->(:SubjectVisit)-[:Reveals]->(withdrawn:Disposition)                
+                WHERE withdrawn.dsdecod IN ['DEATH', 'LACK OF EFFICACY', 'PHYSICIAN DECISION', 'STUDY TERMINATED BY SPONSOR', 'WITHDRAWAL BY SUBJECT'] 
+                WITH s, prestatus, withdrawn, concat(s.id, ': Withdrawn from Study') AS ss_id, withdrawn.dsstdtc AS ss_assigned, withdrawn.dsterm as ss_reason
+                MERGE (ss:SubjectStatus {id: ss_id, name: 'Withdrawn from Study', assigned: ss_assigned, reason:ss_reason})
+                MERGE (s)-[:Achieves]->(ss)
+                MERGE (withdrawn)-[:Assigns]->(ss)
+                MERGE (prestatus)-[:AchievesNext]->(ss)
+            lost: |  # Disposition "LOST TO FOLLOW-UP" assigns corresponding status; status chain from the last chain node to Lost to Follow-up
+                MATCH (s:Subject)-[:Achieves]->(prestatus:SubjectStatus) WHERE NOT (prestatus)-[:AchievesNext]->(:SubjectStatus)
+                MATCH (s:Subject)-[:Attends]->(:SubjectVisit)-[:Reveals]->(lost:Disposition) WHERE lost.dsdecod = 'LOST TO FOLLOW-UP'
+                WITH s, prestatus, lost, concat(s.id, ': Lost to Follow-up') AS ss_id, lost.dsstdtc AS ss_assigned, lost.dsterm as ss_reason
+                MERGE (ss:SubjectStatus {id: ss_id, name: 'Lost to Follow-up', assigned: ss_assigned, reason:ss_reason})
+                MERGE (s)-[:Achieves]->(ss)
+                MERGE (lost)-[:Assigns]->(ss)
+                MERGE (prestatus)-[:AchievesNext]->(ss)
+engine:
+    global:  # Global variables
+        today: RETURN CAST(current_date() AS STRING) AS today
+        study_site_subject: |
+            MATCH (su:Subject)-[:RecruitedBy]->(si:Site)-[:SelectedFor]->(s:Study)
+            RETURN s.id AS Study, si.id AS Site, su.id AS Subject
+        subject_visit_timeline: |
+            MATCH (sv:SubjectVisit)
+            WITH MIN(sv.svstdtc) AS earliest, MAX(sv.svstdtc) - MIN(sv.svstdtc) AS timeline_length
+            UNWIND range(0, timeline_length) AS shift
+            WITH last_day(earliest + shift) AS today
+            RETURN DISTINCT CAST(today AS STRING) AS today
+            ORDER by today
+    default:
+        scope:
+            hierarchy: global:study_site_subject
+        level:
+            - Study
+            - Site
+        parameter:
+            today: global:today
+metric:
+    info:  # FYI, various codes and explanations
+        level:
+            Study:
+                description: Study/ Trial-level calculations. Letter T stands for Trial
+                letter: T
+            Geography:
+                description: Usually geohraphy is a group of countries
+                letter: G
+            Country:
+                description: Metrics are calculated per country
+                letter: C
+            Site:
+                description: Site-level calculations
+                letter: S
+            Subject:
+                description: Subject-level calculations. Letter P stands for Patient
+                letter: P
+            Detail:
+                description: Everything below the Subject level
+                letter: D
+            Unbound:
+                description: Calculations based on readings not associated with hierarchy or timeline (e.g. due to data insufficiencies)
+                letter: U
+        group:  # Metric groups
+            Recruitment and Retention:
+                description: Metrics compare actual recruitment to the projected targets
+                code: RR
+            Safety and Adverse Events:
+                description: Metrics assess trial safety based on the counts of (S)AEs
+                code: AE
+    parameter:
+        today:
+            type: DATE
+            description: The date on which actual metrics should be calculated, date of the report
+    catalog:
+        Recruitment and Retention:
+            RR.Subj.Count:
+                name: Number of Subjects
+                description: Count of Subjects that attended at least one visit before or on the report date
+                level:
+                    Site:
+                        query: |  # count Subjects that have at least one visit in the report timeline
+                            MATCH (v:SubjectVisit)<-[:Attends]-(su:Subject)-[:RecruitedBy]->(si:Site)
+                            WHERE v.svstdtc < $today + 1
+                            RETURN si.id AS Site, COUNT(DISTINCT su) AS value
+                    Study:
+                        aggregate:
+                            base: Site
+                            method: sum
+            RR.Subj.Scrn.Count:
+                name: Number of Screened Subjects
+                description: Count of Subjects that achieved status Screened before or on the report date
+                level:
+                    Site:
+                        query: |  # count Subjects with at least one Screened status
+                            MATCH (ss:SubjectStatus)<-[:Achieves]-(su:Subject)-[:RecruitedBy]->(si:Site)
+                            WHERE ss.name = 'Screened' AND ss.assigned < $today + 1
+                            RETURN si.id AS Site, COUNT(DISTINCT su) AS value
+                    Study:
+                        aggregate:
+                            base: Site
+                            method: sum
+            RR.Subj.Rand.Count:
+                name: Number of Randomized Subjects
+                description: Count of Subjects that achieved status Randomized before or on the report date
+                level:
+                    Site:
+                        query: |  # count Subjects with at least one Randomized status
+                            MATCH (ss:SubjectStatus)<-[:Achieves]-(su:Subject)-[:RecruitedBy]->(si:Site)
+                            WHERE ss.name = 'Randomized' AND ss.assigned < $today + 1
+                            RETURN si.id AS Site, COUNT(DISTINCT su) AS value
+                    Study:
+                        aggregate:
+                            base: Site
+                            method: sum
+            RR.Subj.SF.Count:
+                name: Number of Screen Failed Subjects
+                description: Count of Subjects that achieved status Screen Failure  before or on the report date
+                level:
+                    Site:
+                        query: |  # count Subjects with at least one Screen Failure status
+                            MATCH (ss:SubjectStatus)<-[:Achieves]-(su:Subject)-[:RecruitedBy]->(si:Site)
+                            WHERE ss.name = 'Screen Failure' AND ss.assigned < $today + 1
+                            RETURN si.id AS Site, COUNT(DISTINCT su) AS value
+                    Study:
+                        aggregate:
+                            base: Site
+                            method: sum
+            RR.Subj.SF.Ratio:
+                name: Screen Failure ratio
+                description: A ratio of the number of Screen Failed to the number of Screened subjects
+                call:
+                    divide:
+                        numerator: RR.Subj.SF.Count
+                        denominator: RR.Subj.Scrn.Count
+        Safety and Adverse Events:
+            AE.AE.Count:
+                name: Number of Adverse Events
+                description: Count of AEs (including the SAEs)
+                level:
+                    Subject:
+                        query: |
+                            MATCH (su:Subject)-[:Suffers]->(ae:AE)
+                            WHERE ae.aestdtc < $today + 1
+                            RETURN su.id AS Subject, COUNT(ae) AS value
+                    Site:
+                        aggregate:
+                            base: Subject
+                            method: sum
+                    Study:
+                        aggregate:
+                            base: Subject
+                            method: sum
+            AE.SAE.Count:
+                name: Number of Serious Adverse Events
+                description: Count of SAEs
+                level:
+                    Subject:
+                        query: |
+                            MATCH (su:Subject)-[:Suffers]->(sae:AE)
+                            WHERE sae.aeser AND sae.aestdtc < $today + 1
+                            RETURN su.id AS Subject, COUNT(sae) AS value
+                    Site:
+                        aggregate:
+                            base: Subject
+                            method: sum
+                    Study:
+                        aggregate:
+                            base: Subject
+                            method: sum
+            AE.AE.Rand.Count:
+                name: Number of Adverse Events in Randomized Subjects
+                description: Count of AEs (including the SAEs) in all Subjects who achieved Randomized status before tomorrow
+                level:
+                    Subject:
+                        query: |  # count AEs, filter by Randomized status                            
+                            MATCH (su:Subject)-[:Suffers]->(ae:AE) 
+                            WHERE ae.aestdtc < today + 1 AND EXISTS 
+                                {MATCH (su)-[:Achieves]->(ss:SubjectStatus) WHERE ss.name = 'Randomized' AND ss.assigned < $today + 1}
+                            RETURN su.id AS Subject, COUNT(ae) AS value
+                    Site:
+                        aggregate:
+                            base: Subject
+                            method: sum
+                    Study:
+                        aggregate:
+                            base: Subject
+                            method: sum
+            AE.Subj.Rand.SubjDays:
+                name: Subject-Days (for AE Rate)
+                description: |
+                    Sum of Subject-days for the Randomized subjects. Each number is calculated
+                    from Randomization as Day 1 to the day of last visit or today, whichever comes earlier
+                level:
+                    Subject:
+                        query: |  # find Randomized and last Subject Status and sum interval length numbers
+                            MATCH (su:Subject)
+                            OPTIONAL MATCH (su)-[:Achieves]->(d1:SubjectStatus) WHERE d1.name = 'Randomized' AND d1.assigned < $today + 1
+                            OPTIONAL MATCH (su)-[:Achieves]->(last:SubjectStatus) WHERE NOT (last)-[:AchievesNext]->(:SubjectStatus)
+                            WITH su,
+                                CASE 
+                                    WHEN d1 IS NULL THEN NULL 
+                                    ELSE least(last.assigned, $today) - d1.assigned + 1
+                                END AS sd
+                            RETURN su.id AS Subject, sd AS value
+                    Site:
+                        aggregate:
+                            base: Subject
+                            method: sum
+                    Study:
+                        aggregate:
+                            base: Subject
+                            method: sum
+            AE.Subj.Rand.SubjMonths:
+                name: Subject-Months (for AE Rate)
+                description: Sum of Subject-months for the Randomized subjects.
+                call:
+                    divide:
+                        numerator: AE.Subj.Rand.SubjDays
+                        denominator: 30
+            AE.AE.Rate:
+                name: AE Rate
+                description: Average number of AEs per subject-month.
+                call:
+                    divide:
+                        numerator: AE.AE.Rand.Count
+                        denominator: AE.Subj.Rand.SubjMonths
+            AE.AE.Rate.ZNorm:
+                name: AE Rate (Z-Normalized)
+                description: Average number of AEs per subject-month, Z-Normalized across Sites.
+                level:
+                    Site:
+                        call:
+                            znorm:
+                                metric: AE.AE.Rate
