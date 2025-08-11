@@ -3,6 +3,7 @@ alias:
     SOURCE2STAGE: $.config.step.source_to_stage
     STAGE2GRAPH: $.config.step.stage_to_graph
     GRAPH_PATH: $.config.connection.graph.path
+    GRAPH_OPTION: $.config.connection.graph.option
     STAGE_PATH: $.config.connection.stage.path
     BUILDER_DDL: $.builder.ddl
     BUILDER_SQL: $.builder.sql
@@ -13,18 +14,18 @@ alias:
     CACHE_METRIC: $.config.cache.metric
 config:
     result:
-        path: result
+        path: demo/result
     step:
-        source_to_stage: 'process/pharmaversesdtm/source_to_stage.ipynb'
-        stage_to_graph: 'process/database/stage_to_graph.ipynb'
+        source_to_stage: 'process/source_to_stage.ipynb'
+        stage_to_graph: 'process/stage_to_graph.ipynb'
     connection:
         sdtm:
-            path: source/pharmaversesdtm/main/data
+            path: demo/source/pharmaversesdtm/data
         stage:
-            path: database/stage/sdtm.ddb
-            meta_path: database/stage/sdtm_meta.txt
+            path: demo/database/stage/sdtm.ddb
+            meta_path: demo/database/stage/sdtm_meta.txt
         graph:
-            path: database/graph/database.kuzu
+            path: demo/database/graph/database.kuzu
             option:
                 max_concurrent_queries: 6
     cache:
