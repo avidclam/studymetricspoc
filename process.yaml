@@ -12,6 +12,10 @@ alias:
     CACHE_ALIAS: $.config.cache.alias
     CACHE_QUERY: $.config.cache.query
     CACHE_METRIC: $.config.cache.metric
+    ENGINE_GLOBAL: $.engine.global
+    ENGINE_DEFAULT: $.engine.default
+    METRIC_PARAMETER: $.metric.parameter
+    METRIC_CATALOG: $.metric.catalog.*
 config:
     result:
         path: demo/result

@@ -36,13 +36,12 @@ class GeneralConfig:
         return result
 
     def _rebuild_alias(self):
-        self.alias = {}
-        if self.alias_section in self.default and isinstance(
-                self.default[self.alias_section], dict):
-            self.alias.update(self.default[self.alias_section])
-        if self.alias_section in self.data and isinstance(
-                self.data[self.alias_section], dict):
-            self.alias.update(self.data[self.alias_section])
+        if isinstance(self.data, dict):
+            self.alias = {}
+            if self.alias_section in self.default and isinstance(self.default[self.alias_section], dict):
+                self.alias.update(self.default[self.alias_section])
+            if self.alias_section in self.data and isinstance(self.data[self.alias_section], dict):
+                self.alias.update(self.data[self.alias_section])
 
     def replace_data(self, data):
         self.data = data
