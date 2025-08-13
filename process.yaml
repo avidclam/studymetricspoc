@@ -33,7 +33,7 @@ config:
             option:
                 max_concurrent_queries: 6
     cache:
-        yaml: false
+        yaml: true
         alias: false
         query: false
         metric: false
