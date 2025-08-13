@@ -2,7 +2,7 @@ import re
 import polars as pl
 from .enginecontext import get_engine_context
 from .engine import filter_scope
-from .dfmethods import dataframe_divide
+from .dfmethods import dataframe_divide, dataframe_znorm
 
 async def calculate_query_metric(query, op):
     ec = get_engine_context()
@@ -60,15 +60,17 @@ async def calculate_call_metric(call, op):
                     dependent_op.update(op)
                     dependent_op['metric'] = value
                     args[arg] = await calculate_metric(dependent_op)
-                else:
-                    args[arg] = value
+            else:
+                args[arg] = value
         error_data = list(filter(lambda x: isinstance(x, dict),  (data for _, data in args.items())))
         if error_data:
             return {'error': 'Error on the call metric'}
         if call_method == 'divide':
             result =  dataframe_divide(args['numerator'], args['denominator'], op.get('level'), 'value')
+        elif call_method == 'znorm':
+            result = dataframe_znorm(args['metric'], op.get('level'), 'value')
         else:
-            result = {'error': f'Call method "{call_method}" not supported'}
+            result = {'error': f"Call method '{call_method}' not supported"}
         break
     if result is None:
         result = {'error': 'Error on the call metric'}
@@ -95,7 +97,7 @@ async def calculate_metric(op):
     elif call:
         result = await calculate_call_metric(call, op)
     else:
-        result = {'error': 'Unsupported calculation method'}
+        result = {'error': 'Unsupported calculation'}
     return result
 
 

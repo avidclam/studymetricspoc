@@ -400,7 +400,7 @@ metric:
                     Subject:
                         query: |  # count AEs, filter by Randomized status                            
                             MATCH (su:Subject)-[:Suffers]->(ae:AE) 
-                            WHERE ae.aestdtc < today + 1 AND EXISTS 
+                            WHERE ae.aestdtc < $today + 1 AND EXISTS 
                                 {MATCH (su)-[:Achieves]->(ss:SubjectStatus) WHERE ss.name = 'Randomized' AND ss.assigned < $today + 1}
                             RETURN su.id AS Subject, COUNT(ae) AS value
                     Site:

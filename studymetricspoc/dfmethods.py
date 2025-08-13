@@ -46,3 +46,17 @@ def dataframe_divide(numerator, denominator, group_column, value_column):
             .alias(value_column)
         )
     ).select([group_column, value_column])
+
+
+def dataframe_znorm(dataframe, group_column, value_column):
+    temp_column = f'{value_column}_norm'
+    return (
+        dataframe
+        .with_columns(
+            (
+                    (pl.col(value_column) - pl.col(value_column).mean()) / pl.col(value_column).std()
+            ).alias(temp_column)
+        )
+        .select([group_column, temp_column])
+        .rename({temp_column: value_column})
+    )
